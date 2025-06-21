@@ -8,12 +8,12 @@ class CompostEnvKineticPhysical(gym.Env):
         self.dt = 600  # 每步10分钟
         self.total_steps = 14 * 24 * 6  # 14天，每小时6步
 
-        # --- 模拟参数 ---
+        # 模拟参数
         self.Hc = 50.0            # 有机质单位产热能力
         self.U = 0.12             # 散热系数
         self.heat_capacity = 600  # 热容（影响升温速度）
 
-        # --- 空间定义 ---
+        # 动作空间和观测空间
         self.action_space = spaces.Discrete(2)
         self.observation_space = spaces.Box(
             low=np.array([0]*3 + [0, 0, 0, 0, 0], dtype=np.float32),
@@ -35,37 +35,39 @@ class CompostEnvKineticPhysical(gym.Env):
         self.action_repeat = 0
         self.prev_T = 25.0
         self.prev_O2 = self.O2
+        self.high_temp_steps = 0  # 高温持续步数
+
         return self._get_obs(), {}
 
     def step(self, action):
         T_avg = np.mean(self.T)
 
-        # --- 热量计算 ---
+        # 热量变化
         temp_factor = self._temp_factor(T_avg)
         oxygen_factor = self._oxygen_factor()
         heat_gen = self.Hc * (self.Md / 1000.0) * temp_factor * oxygen_factor
         heat_loss = self.U * max(0, T_avg - self.room_temp)
-        vent_loss = 0.3 if action == 1 else 0.05
+        vent_loss = 0.4 if action == 1 else 0.05
         total_loss = heat_loss + vent_loss
         dT = (heat_gen - total_loss) / (self.heat_capacity * 3)
         self.T += dT * self.dt
         self.T = np.clip(self.T, self.room_temp, 100)
 
-        # --- 氧气变化（强化消耗机制）---
+        # 氧气变化（强化消耗机制）
         temp_o2_factor = 1 + 10 * temp_factor
         O2_consume = 0.3 * temp_factor * temp_o2_factor
         self.O2 -= O2_consume
         if action == 1:
-            self.O2 = min(21.0, self.O2 + 3.0)
+            self.O2 = min(21.0, self.O2 + 2.0)
         self.O2 = max(0.0, self.O2)
 
-        # --- CO₂变化 ---
+        # CO2变化
         self.CO2 += 0.05 * O2_consume
         if action == 1:
             self.CO2 *= 0.8
         self.CO2 = np.clip(self.CO2, 0.04, 20)
 
-        # --- 水分蒸发 ---
+        # 水分蒸发
         humidity_factor = np.clip((self.H2O - 0.2) / 0.4, 0, 1.0)
         evap = min(
             0.0000004 * humidity_factor * max(0, T_avg - self.room_temp) / (self.room_temp + 0.01) *
@@ -75,12 +77,12 @@ class CompostEnvKineticPhysical(gym.Env):
         self.H2O -= evap
         self.H2O = np.clip(self.H2O, 0.2, 0.75)
 
-        # --- 有机质消耗 ---
+        # 有机质消耗
         resp_rate = 200 * O2_consume * temp_factor
         self.Md -= resp_rate * self.dt / 3600
         self.Md = max(0.0, self.Md)
 
-        # --- 动作记录 ---
+        # 动作重复监控
         if self.last_action == action:
             self.action_repeat += 1
         else:
@@ -91,47 +93,51 @@ class CompostEnvKineticPhysical(gym.Env):
         done = self.step_num >= self.total_steps
         truncated = False
 
-
-
-        # === 强制终止条件：O₂ 过低 ===
-        if self.O2 < 15:
-            print(f"[终止] O₂过低：{self.O2:.2f}%，Step={self.step_num}")
-            return self._get_obs(), -100000, True, False, {}
-
-        # --- 分阶段奖励函数 ---
+        # 阶段判断
         phase = self._get_phase(self.step_num, T_avg)
         reward = 0
 
+        # --- 升温期：升温速度奖励 ---
         if phase == "heating":
             delta_T = T_avg - self.prev_T
-            reward += max(0, delta_T) * 5.0  # 奖励升温
+            if delta_T > 0:
+                reward += delta_T * 20.0
+            elif delta_T < 0:
+                reward -= 5
 
+        # --- 高温期：55~70°C维持奖励 ---
         elif phase == "high":
-            if T_avg >= 55:
-                reward += 3.0
+            if 55 <= T_avg <= 70:
+                reward += 2.0
+                self.high_temp_steps += 1
+                reward += min(self.high_temp_steps * 0.2, 20.0)
+            else:
+                self.high_temp_steps = 0
 
+        # --- 降温期控制 ---
         elif phase == "cooling":
-            if self.O2 > 19.5 and action == 1:
-                reward -= 0.5
+            delta_T = self.prev_T - T_avg
+            if 0 <= delta_T <= 1.0:
+                reward += 1.0
+            elif delta_T > 1.0:
+                reward -= (delta_T - 1.0) * 2.0
 
 
-        # 氧气控制奖励
-        if self.O2 < 18 and action == 0:  # 低于18时，惩罚
-            reward -= (18 - self.O2)**2 *10
-        if 18 <= self.O2 <= 19.5:
-            reward += 1.0  # 鼓励维持在理想区
-        if self.O2 >= 19.5 and action == 1:  # 大于19.5时曝气惩罚 
-            reward -= 1.0
 
-        # --- 其他奖励 ---
-        reward += (0.6 - self.H2O) * 1  # 鼓励水分下降        
-        reward += max(0, 1.0 - self.CO2) * 0.5  # CO₂控制奖励
+        # --- 氧气奖励 ---
+        reward += self._oxygen_reward(self.O2, action, phase)
 
+        # --- 水分奖励 ---
+        reward += (0.6 - self.H2O) * 1.5
+
+        # --- CO2奖励 ---
+        reward += max(0, 1.0 - self.CO2) * 1.0
+
+        # --- 操作多样性奖励 ---
         if self.action_repeat == 0:
-            reward += 1  # 鼓励操作多样性
-        elif self.action_repeat > 20:
-            reward -= 1 + 0.05 * (self.action_repeat - 20)
-
+            reward += 2.0
+        elif self.action_repeat > 6:
+            reward -= 0.5 * (self.action_repeat - 6)
 
         self.prev_T = T_avg
         self.prev_O2 = self.O2
@@ -157,10 +163,24 @@ class CompostEnvKineticPhysical(gym.Env):
     def _get_phase(self, step_num, T_avg):
         if step_num < 288 and T_avg < 55:
             return "heating"
-        elif 288 <= step_num < 1008 :
+        elif 288 <= step_num < 1008 and T_avg >= 55:
             return "high"
         else:
-            if T_avg < 45:
-                return "cooling"
-            else:
-                return "high"
+            return "cooling" if T_avg < 45 else "high"
+
+    def _oxygen_reward(self, o2, action, phase):
+        if phase == "heating" or phase == "cooling":
+            if 16 < o2 < 19: 
+                return 2
+            elif o2 < 16: 
+                return -(17 - o2)**2 * 10
+            elif o2 >= 19 and action == 1: 
+                return -(o2 - 19) * 2
+        elif phase == "high":
+            if o2 < 18: 
+                return -(18 - o2)**2 * 10
+            if 18 <= o2 <= 20: 
+                return 2
+            if o2 > 20: 
+                return -(o2 - 20) * 2
+        return 0
