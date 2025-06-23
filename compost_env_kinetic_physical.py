@@ -118,7 +118,7 @@ class CompostEnvKineticPhysical(gym.Env):
         elif phase == "cooling":
             delta_T = self.prev_T - T_avg
             if 0 <= delta_T <= 1.0:
-                reward += 1.0
+                reward += 2.0
             elif delta_T > 1.0:
                 reward -= (delta_T - 1.0) * 2.0
 
@@ -163,10 +163,12 @@ class CompostEnvKineticPhysical(gym.Env):
     def _get_phase(self, step_num, T_avg):
         if step_num < 288 and T_avg < 55:
             return "heating"
-        elif 288 <= step_num < 1008 and T_avg >= 55:
+        elif T_avg >= 55:
             return "high"
+        elif T_avg < 45:
+            return "cooling"
         else:
-            return "cooling" if T_avg < 45 else "high"
+            return "high"
 
     def _oxygen_reward(self, o2, action, phase):
         if phase == "heating" or phase == "cooling":
@@ -175,12 +177,12 @@ class CompostEnvKineticPhysical(gym.Env):
             elif o2 < 16: 
                 return -(17 - o2)**2 * 10
             elif o2 >= 19 and action == 1: 
-                return -(o2 - 19) * 2
+                return -(o2 - 19) * 5
         elif phase == "high":
             if o2 < 18: 
                 return -(18 - o2)**2 * 10
             if 18 <= o2 <= 20: 
                 return 2
             if o2 > 20: 
-                return -(o2 - 20) * 2
+                return -(o2 - 20) * 5
         return 0

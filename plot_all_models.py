@@ -3,7 +3,6 @@ import re
 import csv
 import numpy as np
 import matplotlib.pyplot as plt
-from datetime import datetime
 
 from stable_baselines3 import PPO
 from compost_env_kinetic_physical import CompostEnvKineticPhysical
@@ -103,7 +102,7 @@ def main():
 
     model_files = [
         f for f in os.listdir(model_dir)
-        if f.startswith("model_step") and f.endswith(".zip")
+        if f.startswith("custom_best_step") and f.endswith(".zip")
     ]
 
     # 按 step 排序
