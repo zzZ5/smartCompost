@@ -92,7 +92,7 @@ class CustomEvalCallback(BaseCallback):
 
         # 3. 氧气得分（O2 不低于15%，16~19区间步数占比高）
         if O2_min < 15:
-            o2_score = -200  # 严重缺氧
+            o2_score = -1000  # 严重缺氧
         else:
             o2_score = (O2_good_steps / self.eval_env.total_steps) * 30
             o2_score -= (O2_too_high_steps / self.eval_env.total_steps) * 100  # O2 > 19 惩罚
@@ -141,7 +141,7 @@ def main():
     )
 
     # 开始训练
-    model.learn(total_timesteps=100_000_000, callback=eval_callback)
+    model.learn(total_timesteps=10_000_000, callback=eval_callback)
 
     # ===== 训练结束后评估最优模型 =====
     print("\n📊 训练完成，加载最佳模型并绘图...\n")

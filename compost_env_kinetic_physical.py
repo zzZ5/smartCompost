@@ -56,7 +56,7 @@ class CompostEnvKineticPhysical(gym.Env):
         # 氧气变化（强化消耗机制）
         temp_o2_factor = 1 + 10 * temp_factor
         O2_consume = 0.3 * temp_factor * temp_o2_factor
-        self.O2 -= O2_consume
+        self.O2 -= O2_consume * 2
         if action == 1:
             self.O2 = min(21.0, self.O2 + 2.0)
         self.O2 = max(0.0, self.O2)
@@ -117,10 +117,10 @@ class CompostEnvKineticPhysical(gym.Env):
         # --- 降温期控制 ---
         elif phase == "cooling":
             delta_T = self.prev_T - T_avg
-            if 0 <= delta_T <= 1.0:
+            if 0 <= delta_T <= 0.45:
                 reward += 2.0
-            elif delta_T > 1.0:
-                reward -= (delta_T - 1.0) * 2.0
+            elif delta_T > 0.45:
+                reward -= (delta_T - 0.45) * 5.0
 
 
 
@@ -173,8 +173,12 @@ class CompostEnvKineticPhysical(gym.Env):
     def _oxygen_reward(self, o2, action, phase):
         if phase == "heating" or phase == "cooling":
             if 16 < o2 < 19: 
-                return 2
+                if 15 < o2 < 17 and action == 1:
+                    return 10
+                return 5
             elif o2 < 16: 
+                if o2 < 15:
+                    return -1000
                 return -(17 - o2)**2 * 10
             elif o2 >= 19 and action == 1: 
                 return -(o2 - 19) * 5
