@@ -2,13 +2,13 @@ import os
 import csv
 import numpy as np
 import matplotlib.pyplot as plt
-from stable_baselines3 import PPO
+from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
-from compost_env_kinetic_physical import CompostEnvKineticPhysical
+from compost_env_kinetic_physical_continuous import CompostEnvKineticPhysical_Continuous
 
 
-# ========== 自定义回调函数：用于评估并保存最优模型 ==========
+# ===== 自定义回调函数 =====
 class CustomEvalCallback(BaseCallback):
     def __init__(self, eval_env, eval_freq, save_path, verbose=1):
         super().__init__(verbose)
@@ -41,8 +41,20 @@ class CustomEvalCallback(BaseCallback):
         O2_too_high_steps = 0
         T_reached_55 = False
 
+        last_vent = False
         while not done:
             action, _ = self.model.predict(obs, deterministic=True)
+            action_value = float(action[0])
+
+            # 三段式判定通风状态
+            if action_value >= 0.7:
+                vent_on = True
+            elif action_value <= 0.3:
+                vent_on = False
+            else:
+                vent_on = last_vent
+            last_vent = vent_on
+
             obs, _, terminated, truncated, _ = self.eval_env.step(action)
             done = terminated or truncated
             T_avg = np.mean(obs[:3])
@@ -63,12 +75,11 @@ class CustomEvalCallback(BaseCallback):
             if O2 > 19:
                 O2_too_high_steps += 1
 
-            if action == 1:
+            if vent_on:
                 total_air_on += 1
 
-        # 综合得分
         if O2_min < 15:
-            return -9999  # 严重缺氧直接淘汰
+            return -9999
 
         heating_score = (1 - heating_achieved_step / 288) * 50 if heating_achieved_step else -100
         high_temp_score = (high_temp_duration / (self.eval_env.total_steps - 288)) * 100
@@ -78,54 +89,60 @@ class CustomEvalCallback(BaseCallback):
         return heating_score + high_temp_score + o2_score + energy_score
 
 
-# ========== 主程序入口 ==========
+# ===== 主程序入口 =====
 def main():
-    log_dir = "logs/"
-    best_model_dir = "./best_model"
+    log_dir = "logs_sac/"
+    best_model_dir = "./best_model_sac"
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(best_model_dir, exist_ok=True)
 
-    num_cpu = 9
-    env = SubprocVecEnv([lambda: CompostEnvKineticPhysical() for _ in range(num_cpu)])
-    eval_env = CompostEnvKineticPhysical()
+    num_cpu = 8
+    env = SubprocVecEnv([lambda: CompostEnvKineticPhysical_Continuous() for _ in range(num_cpu)])
+    eval_env = CompostEnvKineticPhysical_Continuous()
 
-    model = PPO(
-        "MlpLstmPolicy",
+    model = SAC(
+        "MlpPolicy",
         env,
         verbose=1,
         tensorboard_log=log_dir,
         learning_rate=2e-4,
-        n_steps=2048,
         batch_size=256,
-        n_epochs=10,
-        gamma=0.995,
-        ent_coef=0.3,
+        gamma=0.99,
+        ent_coef="auto",
         device="cpu"
     )
 
     eval_callback = CustomEvalCallback(
         eval_env=eval_env,
-        eval_freq=1000,
+        eval_freq=500,
         save_path=best_model_dir
     )
 
-    model.learn(total_timesteps=10_000_000, callback=eval_callback)
+    model.learn(total_timesteps=1_000_000, callback=eval_callback)
 
-    # ===== 最优模型评估与结果可视化 =====
     print("\n📊 训练完成，加载最佳模型并绘图...\n")
-    best_model = PPO.load(os.path.join(best_model_dir, "best_model.zip"))
+    best_model = SAC.load(os.path.join(best_model_dir, "best_model.zip"))
     obs, _ = eval_env.reset()
 
     T1_list, T2_list, T3_list = [], [], []
-    CO2_list, O2_list, H2O_list, actions, steps, rewards, phase_code_list = [], [], [], [], [], [], [], []
+    CO2_list, O2_list, H2O_list, actions, steps, rewards = [], [], [], [], [], []
 
     done = False
     total_reward = 0
+    vent_on = False
 
     while not done:
         action, _ = best_model.predict(obs, deterministic=True)
+        a = float(action[0])
+        if a >= 0.7:
+            vent_on = True
+        elif a <= 0.3:
+            vent_on = False
+        # 否则维持上一次状态
+
         obs, reward, terminated, truncated, _ = eval_env.step(action)
         done = terminated or truncated
+
         step = int(obs[7])
         T1_list.append(obs[0])
         T2_list.append(obs[1])
@@ -133,22 +150,21 @@ def main():
         O2_list.append(obs[3])
         CO2_list.append(obs[4])
         H2O_list.append(obs[5])
-        actions.append(int(action))
+        actions.append(1 if vent_on else 0)
         steps.append(step)
         rewards.append(reward)
-        phase_code_list.append(int(obs[8]))
         total_reward += reward
 
-    # 保存 CSV 文件（含阶段信息）
-    with open("run_result_final.csv", "w", newline="") as f:
+    # 保存 CSV
+    with open("run_result_final_sac.csv", "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Hour", "T1", "T2", "T3", "O2", "CO2", "H2O", "Action", "Reward", "PhaseCode"])
+        writer.writerow(["Hour", "T1", "T2", "T3", "O2", "CO2", "H2O", "Action", "Reward"])
         for i in range(len(T1_list)):
             hour = float(steps[i]) * 10 / 60
             writer.writerow([hour, T1_list[i], T2_list[i], T3_list[i],
-                             O2_list[i], CO2_list[i], H2O_list[i], actions[i], rewards[i], phase_code_list[i]])
+                             O2_list[i], CO2_list[i], H2O_list[i], actions[i], rewards[i]])
 
-    # 绘图展示
+    # 绘图
     T_avg = np.mean([T1_list, T2_list, T3_list], axis=0)
     time = [s * 10 / 60 for s in steps]
     plt.figure(figsize=(12, 12))
@@ -190,7 +206,7 @@ def main():
     plt.legend()
 
     plt.tight_layout()
-    plt.savefig("run_result_final.png", dpi=300)
+    plt.savefig("run_result_final_sac.png", dpi=300)
     plt.show()
 
 
