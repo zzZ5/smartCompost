@@ -1,0 +1,8 @@
+flask
+flask-cors
+paho-mqtt
+stable-baselines3
+sqlite3
+matplotlib
+numpy
+torch
